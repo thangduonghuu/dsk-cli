@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="576" height="192" viewBox="0 0 576 192" role="img" aria-label="DSK CLI ASCII wordmark">
+  <style>
+    text { font-family: Menlo, Consolas, "DejaVu Sans Mono", monospace; font-size: 20px; white-space: pre; }
+    .wordmark { fill: #4d6bfe; }
+    .tagline { fill: #8a8f98; }
+    .brand { fill: #4d6bfe; }
+  </style>
+  <text x="16" y="34" class="wordmark" xml:space="preserve">██████╗ ███████╗██╗  ██╗     ██████╗██╗     ██╗</text>
+  <text x="16" y="60" class="wordmark" xml:space="preserve">██╔══██╗██╔════╝██║ ██╔╝    ██╔════╝██║     ██║</text>
+  <text x="16" y="86" class="wordmark" xml:space="preserve">██║  ██║███████╗█████╔╝     ██║     ██║     ██║</text>
+  <text x="16" y="112" class="wordmark" xml:space="preserve">██║  ██║╚════██║██╔═██╗     ██║     ██║     ██║</text>
+  <text x="16" y="138" class="wordmark" xml:space="preserve">██████╔╝███████║██║  ██╗    ╚██████╗███████╗██║</text>
+  <text x="16" y="164" class="wordmark" xml:space="preserve">╚═════╝ ╚══════╝╚═╝  ╚═╝     ╚═════╝╚══════╝╚═╝</text>
+  <text x="16" y="188" xml:space="preserve"><tspan class="tagline">powered by </tspan><tspan class="brand">DeepSeek</tspan></text>
+</svg>

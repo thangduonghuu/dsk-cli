@@ -102,7 +102,7 @@ test("renderBanner full splash: welcome card, DeepSeek logo, tips", () => {
   assert.ok(splash.includes("Welcome to dsk"), splash);
   assert.ok(splash.includes("the DeepSeek coding agent"), splash);
   assert.ok(splash.includes("●"), "welcome dot");
-  assert.ok(splash.includes("██████╗ ███████╗ ██╗  ██╗"), "DSK CLI wordmark");
+  assert.ok(splash.includes("██████╗ ███████╗██╗  ██╗"), "DSK CLI wordmark");
   assert.ok(splash.includes("powered by DeepSeek"), splash);
   assert.ok(splash.includes("dsk v0.1.0"), splash);
   assert.ok(splash.includes("plan mode"), splash);
