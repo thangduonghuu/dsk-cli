@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.test-home/
+.test-work-*/
+*.log
+.DS_Store
+*.tgz
+.dbg-*/

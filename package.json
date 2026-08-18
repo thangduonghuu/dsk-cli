@@ -1,0 +1,43 @@
+{
+  "name": "dsk",
+  "version": "0.1.0",
+  "description": "A Claude-Code-style agentic terminal tool powered by the DeepSeek API",
+  "type": "module",
+  "bin": {
+    "dsk": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test",
+    "verify:live": "node scripts/verify-live.mjs"
+  },
+  "keywords": [
+    "cli",
+    "deepseek",
+    "agent",
+    "terminal",
+    "ai"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^6.0.0",
+    "commander": "^15.0.0",
+    "fast-diff": "^1.3.0",
+    "glob": "^13.0.6",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/fast-diff": "^1.1.0",
+    "@types/node": "^26.2.0",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
+  }
+}
