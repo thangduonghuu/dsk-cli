@@ -90,6 +90,85 @@ function sleep(ms: number) {
 }
 
 /**
+ * One-shot non-streaming completion, used for cheap helper calls like
+ * conversation summarization (stream: false). Returns the full assistant text
+ * and usage. Retries transient errors (429/5xx, network) once with backoff.
+ */
+export async function completeNonStreaming(
+  settings: EffectiveSettings,
+  messages: ChatMessage[],
+  opts: { maxTokens?: number; signal?: AbortSignal } = {}
+): Promise<{ content: string; usage: StreamResult["usage"] }> {
+  const { apiKey, baseUrl, model } = settings;
+  const body: Record<string, unknown> = {
+    model,
+    messages,
+    stream: false,
+    max_tokens: opts.maxTokens ?? 1024,
+    // Summarization doesn't need chain-of-thought; keep it fast and cheap.
+    thinking: { type: "disabled" },
+  };
+
+  let attempts = 0;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    attempts += 1;
+    try {
+      const resp = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: opts.signal,
+      });
+      if (!resp.ok) {
+        let detail = "";
+        try {
+          const err = (await resp.json()) as { error?: { message?: string } } | string;
+          detail = typeof err === "string" ? err : (err.error?.message ?? JSON.stringify(err));
+        } catch {
+          detail = await resp.text().catch(() => "");
+        }
+        const message = detail ? `${resp.status}: ${detail}` : `HTTP ${resp.status}`;
+        throw new DskApiError(resp.status, message, RETRYABLE_STATUS.has(resp.status));
+      }
+      const json = (await resp.json()) as {
+        choices?: Array<{ message?: { content?: string | null } }>;
+        usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null;
+      };
+      const content = json.choices?.[0]?.message?.content ?? "";
+      const u = json.usage;
+      const usage: StreamResult["usage"] = u
+        ? {
+            promptTokens: u.prompt_tokens ?? 0,
+            completionTokens: u.completion_tokens ?? 0,
+            totalTokens: u.total_tokens ?? 0,
+          }
+        : null;
+      return { content, usage };
+    } catch (err) {
+      if (err instanceof DskApiError) {
+        if (err.status === 401) {
+          throw new DskApiError(
+            401,
+            "Authentication failed (401). Your DeepSeek API key is invalid. Fix it with `dsk config set api-key <key>` or DEEPSEEK_API_KEY.",
+            false
+          );
+        }
+        if (!err.retryable || attempts >= MAX_ATTEMPTS) throw err;
+        await sleep(1000 * 2 ** (attempts - 1));
+        continue;
+      }
+      if (err instanceof Error && err.name === "AbortError") throw err;
+      if (attempts >= MAX_ATTEMPTS) throw err;
+      await sleep(1000 * 2 ** (attempts - 1));
+    }
+  }
+}
+
+/**
  * POST /chat/completions with stream: true and yield text/reasoning deltas as
  * they arrive, then a `done` event with the fully accumulated result
  * (including tool_calls assembled from fragment deltas).

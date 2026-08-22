@@ -8,7 +8,7 @@ export interface Completion {
   matches: string[];
 }
 
-export const COMMANDS = ["help", "clear", "model", "config", "exit", "usage", "diff", "theme", "color", "mode"];
+export const COMMANDS = ["help", "clear", "model", "config", "exit", "usage", "diff", "theme", "color", "mode", "sessions", "init", "compact"];
 
 /**
  * Completion for `/` commands and `@` file-path mentions. Returns the range

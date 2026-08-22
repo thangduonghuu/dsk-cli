@@ -16,6 +16,10 @@ export interface PermissionGateOptions {
   skipAll: boolean;
   /** In-session permission mode (default: "bypassPermissions" — no prompts). */
   mode?: PermissionMode;
+  /** Tool names always allowed without prompting (e.g. ["bash"]). */
+  allowedTools?: string[];
+  /** Tool names always denied without prompting (overrides mode + allowlist). */
+  deniedTools?: string[];
   /** Ask the user a question; resolve null on EOF (treated as "no"). */
   ask: (question: string) => Promise<string | null>;
   /** Whether stdin is a TTY. Non-interactive runs deny mutations unless skipAll. */
@@ -38,12 +42,18 @@ export class PermissionGate {
 
   constructor(private opts: PermissionGateOptions) {}
 
-  /** Ask permission for a specific action description (e.g. "bash: npm test"). */
-  async ask(description: string): Promise<boolean> {
+  /** Ask permission for a specific action description (e.g. "bash: npm test").
+   * `tool` is the tool name (e.g. "bash"), used for allow/deny lists. */
+  async ask(description: string, tool?: string): Promise<boolean> {
+    // The deny list is a hard veto — it wins over bypassPermissions, skipAll,
+    // the allowlist and every permission mode.
+    const denied = this.opts.deniedTools?.includes(tool ?? "");
+    if (denied) return false;
     if (this.opts.skipAll || this.opts.mode === "bypassPermissions") return true;
+    if (this.opts.mode === "plan") return false;
+    if (this.opts.allowedTools?.includes(tool ?? "")) return true;
     const cat = categoryOf(description);
     if (this.opts.mode === "acceptEdits" && cat === "edit") return true;
-    if (this.opts.mode === "plan") return false;
     // The allow/deny sets key on the FULL description so two commands sharing
     // a long prefix are still distinct identities.
     if (this.allowed.has(description)) return true;

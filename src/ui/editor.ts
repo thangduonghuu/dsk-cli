@@ -8,6 +8,9 @@ const ESC = "\x1b";
 const hideCursor = `${ESC}[?25l`;
 const showCursor = `${ESC}[?25h`;
 const eraseDown = `${ESC}[J`;
+/** Bracketed paste: lets the terminal wrap pastes so pasted \r ≠ Enter. */
+const bracketedPasteOn = `${ESC}[?2004h`;
+const bracketedPasteOff = `${ESC}[?2004l`;
 
 export interface EditorCallbacks {
   /** Returns the footer/status line (or null). Re-evaluated on every render. */
@@ -26,10 +29,11 @@ export interface EditorCallbacks {
   contStyle?: (s: string) => string;
 }
 
-interface TabState {
+interface SuggState {
   start: number;
   end: number;
   matches: string[];
+  /** Index of the match the next Tab will insert. */
   cycle: number;
 }
 
@@ -51,7 +55,13 @@ export class Editor {
   /** True while the prompt block is drawn at the bottom of the screen. */
   private blockOnScreen = false;
   private toast: string[] = [];
-  private tab: TabState | null = null;
+  /** Live completion candidates (shown as a popup above the input). */
+  private sugg: SuggState | null = null;
+  /** Bump on every keystroke so stale async completions are dropped. */
+  private suggToken = 0;
+  /** Non-null while a bracketed paste is being received (buffered, not yet
+   * inserted), so pasted newlines never submit the prompt. */
+  private pasteBuf: string | null = null;
   private histIdx = -1;
   private draft = "";
   private history: string[];
@@ -114,6 +124,7 @@ export class Editor {
   pause(): void {
     this.offKey();
     stdout.off("resize", this.onResize);
+    stdout.write(bracketedPasteOff);
     stdout.write(showCursor);
     stdout.write("\r\n");
   }
@@ -122,6 +133,7 @@ export class Editor {
   resume(): void {
     this.offKey = onKey(this.keyHandler);
     stdout.on("resize", this.onResize);
+    stdout.write(bracketedPasteOn);
     this.pin();
     this.render();
   }
@@ -157,7 +169,8 @@ export class Editor {
     this.text = "";
     this.pos = 0;
     this.toast = [];
-    this.tab = null;
+    this.sugg = null;
+    this.suggToken += 1; // invalidate any in-flight completion from a previous prompt
     this.histIdx = -1;
     this.draft = "";
     this.pin();
@@ -171,6 +184,22 @@ export class Editor {
 
   private handleKey(k: KeyEvent): void {
     if (!this.pending) return;
+
+    // Bracketed paste: buffer everything until paste-end, then insert it as
+    // literal text. Inside a paste the newlines come through as `return` key
+    // events, which would otherwise submit the prompt mid-paste.
+    if (k.name === "paste-start") {
+      this.pasteBuf = "";
+      return;
+    }
+    if (k.name === "paste-end") {
+      this.finishPaste();
+      return;
+    }
+    if (this.pasteBuf !== null) {
+      this.pasteBuf += k.sequence || "";
+      return;
+    }
 
     if (k.ctrl && k.name === "c") {
       if (this.text) {
@@ -202,7 +231,7 @@ export class Editor {
     }
     if (k.name === "tab") {
       if (k.shift) {
-        this.tab = null;
+        this.sugg = null;
         this.toast = [];
         this.cb.onShiftTab?.();
         this.render();
@@ -212,8 +241,8 @@ export class Editor {
       return;
     }
 
-    // Everything else clears completion state + toast.
-    this.tab = null;
+    // Everything else clears the toast (completion state is refreshed on any
+    // text mutation, and cursor moves keep the popup visible).
     this.toast = [];
 
     switch (k.name) {
@@ -253,11 +282,13 @@ export class Editor {
     if (k.ctrl && k.name === "u") {
       this.pos = this.lineStart();
       this.text = this.text.slice(this.pos);
+      void this.refreshSugg();
       this.render();
       return;
     }
     if (k.ctrl && k.name === "k") {
       this.text = this.text.slice(0, this.pos);
+      void this.refreshSugg();
       this.render();
       return;
     }
@@ -268,6 +299,7 @@ export class Editor {
         const cut = this.pos - m[0].length;
         this.text = this.text.slice(0, cut) + this.text.slice(this.pos);
         this.pos = cut;
+        void this.refreshSugg();
         this.render();
       }
       return;
@@ -296,32 +328,45 @@ export class Editor {
     if (this.pos === 0) return;
     this.text = this.text.slice(0, this.pos - 1) + this.text.slice(this.pos);
     this.pos -= 1;
-    this.tab = null;
     this.toast = [];
+    void this.refreshSugg();
     this.render();
   }
 
   private del(): void {
     if (this.pos >= this.text.length) return;
     this.text = this.text.slice(0, this.pos) + this.text.slice(this.pos + 1);
-    this.tab = null;
     this.toast = [];
+    void this.refreshSugg();
     this.render();
   }
 
   private clearDraft(): void {
     this.text = "";
     this.pos = 0;
-    this.tab = null;
     this.toast = [];
+    void this.refreshSugg();
     this.render();
   }
 
   private insert(s: string): void {
     this.text = this.text.slice(0, this.pos) + s + this.text.slice(this.pos);
     this.pos += s.length;
-    this.tab = null;
+    this.toast = [];
+    void this.refreshSugg();
     this.render();
+  }
+
+  /**
+   * Insert a completed bracketed paste as literal text at the cursor. Normalizes
+   * CR/CRLF (what terminals send for pasted newlines) to LF and drops trailing
+   * blank lines, so the user stays at the prompt until they press Enter.
+   */
+  private finishPaste(): void {
+    const buf = this.pasteBuf ?? "";
+    this.pasteBuf = null;
+    const cleaned = buf.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\n+$/, "");
+    if (cleaned) this.insert(cleaned);
   }
 
   private handleEnter(): void {
@@ -338,35 +383,78 @@ export class Editor {
     this.submit();
   }
 
+  /**
+   * Tab inserts the currently highlighted suggestion and moves the highlight to
+   * the next candidate. If no live popup is up yet (async completion pending or
+   * none), fetch candidates directly and apply the first.
+   */
   private async handleTab(): Promise<void> {
     if (!this.cb.complete) return;
-    if (this.tab) {
-      this.tab.cycle = (this.tab.cycle + 1) % this.tab.matches.length;
-      this.applyTab();
+    if (this.sugg && this.sugg.matches.length > 0) {
+      this.applySugg(); // insert the highlighted match
+      this.sugg.cycle = (this.sugg.cycle + 1) % this.sugg.matches.length;
+      this.render();
       return;
     }
     const c = await this.cb.complete(this.text, this.pos);
     if (!c || c.matches.length === 0) return;
-    this.tab = { start: c.start, end: c.end, matches: c.matches, cycle: 0 };
-    this.applyTab();
+    this.sugg = { start: c.start, end: c.end, matches: c.matches, cycle: 0 };
+    this.applySugg();
+    this.sugg.cycle = (this.sugg.cycle + 1) % this.sugg.matches.length;
+    this.render();
   }
 
-  private applyTab(): void {
-    const tab = this.tab;
-    if (!tab) return;
-    const m = tab.matches[tab.cycle];
-    this.text = this.text.slice(0, tab.start) + m + this.text.slice(tab.end);
-    this.pos = tab.start + m.length;
-    if (tab.matches.length > 1) {
-      this.toast = [
-        tab.matches
-          .map((x, i) => (i === tab.cycle ? chalk.inverse(x) : chalk.dim(x)))
-          .join("   "),
-      ];
-    } else {
-      this.toast = [];
+  /** Replace the completion range with the highlighted match. */
+  private applySugg(): void {
+    const s = this.sugg;
+    if (!s) return;
+    const m = s.matches[s.cycle];
+    this.text = this.text.slice(0, s.start) + m + this.text.slice(s.end);
+    this.pos = s.start + m.length;
+    // Keep the range in sync so cycling between matches of different lengths
+    // replaces the previous match instead of appending to it.
+    s.end = s.start + m.length;
+  }
+
+  /**
+   * Recompute the live suggestion popup for the current text. Async so the
+   * `complete` callback can do filesystem work (`@` paths); a token guards
+   * against out-of-order resolutions when typing fast.
+   */
+  private async refreshSugg(): Promise<void> {
+    if (!this.cb.complete) {
+      this.sugg = null;
+      return;
     }
-    this.render();
+    const token = ++this.suggToken;
+    const c = await this.cb.complete(this.text, this.pos);
+    if (token !== this.suggToken) return; // a newer keystroke superseded this
+    this.sugg = c && c.matches.length > 0 ? { start: c.start, end: c.end, matches: c.matches, cycle: 0 } : null;
+    if (this.pending) this.render();
+  }
+
+  /**
+   * Render the suggestion popup: a vertical list of candidates above the input,
+   * with the next-Tab match highlighted. Long lists are windowed so the popup
+   * never takes over the terminal.
+   */
+  private suggestionLines(): string[] {
+    const s = this.sugg;
+    if (!s || s.matches.length === 0) return [];
+    const MAX = 8;
+    const total = s.matches.length;
+    let start = 0;
+    if (total > MAX) {
+      start = Math.max(0, Math.min(s.cycle - Math.floor(MAX / 2), total - MAX));
+    }
+    const out: string[] = [];
+    for (let i = start; i < Math.min(start + MAX, total); i++) {
+      const m = s.matches[i];
+      const selected = i === s.cycle;
+      const marker = selected ? chalk.cyan("❯") : " ";
+      out.push(selected ? `${marker} ${chalk.inverse(m)}` : `${marker} ${chalk.dim(m)}`);
+    }
+    return out;
   }
 
   // ------------------------------------------------------------- navigation
@@ -428,6 +516,7 @@ export class Editor {
   private setText(t: string): void {
     this.text = t;
     this.pos = t.length;
+    void this.refreshSugg();
     this.render();
   }
 
@@ -479,7 +568,7 @@ export class Editor {
    */
   private render(): void {
     const footer = this.cb.footer?.() ?? null;
-    const { lines, cursorRow, cursorCol } = this.layout(footer);
+    const { lines, cursorRow, cursorCol, suggCount } = this.layout(footer);
     const barH = lines.length;
     const rows = stdout.rows || 24;
     const start = Math.max(1, rows - barH + 1);
@@ -497,8 +586,9 @@ export class Editor {
     }
     stdout.write(showCursor);
     // Move from the block's last row up to the input cursor's row, then right
-    // to the cursor column. Toast lines sit above the input, so they offset it.
-    const up = barH - 1 - this.toast.length - cursorRow;
+    // to the cursor column. Toast + suggestion lines sit above the input, so
+    // they offset it.
+    const up = barH - 1 - this.toast.length - suggCount - cursorRow;
     if (up > 0) stdout.write(`${ESC}[${up}A`);
     stdout.write(`\r${ESC}[${cursorCol}C`);
 
@@ -507,7 +597,7 @@ export class Editor {
     this.blockOnScreen = true;
   }
 
-  private layout(footer: string | null): { lines: string[]; cursorRow: number; cursorCol: number } {
+  private layout(footer: string | null): { lines: string[]; cursorRow: number; cursorCol: number; suggCount: number } {
     const cols = stdout.columns || 80;
     const promptW = this.promptWidth;
     const contW = 4; // "  │ "
@@ -556,9 +646,10 @@ export class Editor {
     cursorRow += rowOff;
     const cursorCol = cPrefixW + (cursorColInLine - rowOff * cAvail);
 
-    const all: string[] = [...this.toast, ...lines];
+    const sugg = this.suggestionLines();
+    const all: string[] = [...this.toast, ...sugg, ...lines];
     if (footer) all.push(...footer.split("\n"));
-    return { lines: all, cursorRow, cursorCol };
+    return { lines: all, cursorRow, cursorCol, suggCount: sugg.length };
   }
 }
 

@@ -1,7 +1,13 @@
 node_modules/
 dist/
+# Test artifacts — temp dirs/files created by `node --test`
 .test-home/
 .test-work-*/
+.test-repl-*/
+.test-edit-*/
+.test-diff-*/
+.test-hist-*/
+.test-sess-*/
 *.log
 .DS_Store
 *.tgz

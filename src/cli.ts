@@ -9,10 +9,11 @@ import { toolCallLine, summarizeTool } from "./ui/render.js";
 import { PERMISSION_MODES, type PermissionMode } from "./permissions.js";
 import type { EffectiveSettings } from "./config.js";
 import type { ChatMessage } from "./agent/deepseekClient.js";
-import { runAgentTurn, SYSTEM_PROMPT } from "./agent/loop.js";
+import { runAgentTurn } from "./agent/loop.js";
 import { allTools } from "./agent/tools/index.js";
 import { PermissionGate } from "./permissions.js";
 import { latestSession, loadSession, saveSession } from "./session.js";
+import { buildSystemPrompt } from "./memory.js";
 import { startRepl } from "./repl.js";
 import { createPrompter, askSecret } from "./input.js";
 import { checkApiKey } from "./models.js";
@@ -35,6 +36,8 @@ program
   .option("--color <name>", `prompt-bar color (${COLOR_NAMES.join(" | ")})`)
   .option("--mode <mode>", `permission mode (${PERMISSION_MODES.join(" | ")})`)
   .option("--permission-mode <mode>", "alias for --mode")
+  .option("--allowed-tools <tools>", "comma-separated tool names always allowed without prompting (bash, write_file, edit_file, ...)")
+  .option("--context-window <tokens>", "override the model context window in tokens (default auto)")
   .option("--resume <id>", "resume a previous session by id")
   .option("--continue", "resume the most recent session")
   .option("--fullscreen", "run the REPL in the alternate (fullscreen) terminal buffer")
@@ -61,6 +64,10 @@ const CONFIG_KEYS: Record<string, keyof NonNullable<ReturnType<typeof loadConfig
   promptcolor: "promptColor",
   mode: "mode",
   fullscreen: "fullscreen",
+  "allowed-tools": "allowedTools",
+  allowedtools: "allowedTools",
+  "context-window": "contextWindow",
+  contextwindow: "contextWindow",
 };
 
 program
@@ -162,14 +169,20 @@ async function configCmd(action: string, key?: string, value?: string): Promise<
       );
       process.exit(1);
     }
-    let parsed: string | number | boolean = value;
-    if (mapped === "temperature" || mapped === "topP" || mapped === "maxTokens") {
+    let parsed: string | number | boolean | string[] = value;
+    if (mapped === "temperature" || mapped === "topP" || mapped === "maxTokens" || mapped === "contextWindow") {
       const n = Number(value);
       if (Number.isNaN(n)) {
         console.error(`"${value}" is not a number.`);
         process.exit(1);
       }
       parsed = n;
+    }
+    if (mapped === "allowedTools") {
+      parsed = value
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
     }
     if (mapped === "thinking" && value !== "enabled" && value !== "disabled") {
       console.error('thinking must be "enabled" or "disabled".');
@@ -222,6 +235,15 @@ function parseArgs(call: { arguments: string }): Record<string, unknown> {
 async function main(promptWords: string[] | undefined, opts: Record<string, unknown>): Promise<void> {
   let settings: EffectiveSettings;
   const palette = getPalette(opts.theme as string | undefined, opts.color as string | undefined);
+  const allowedTools = (opts.allowedTools as string | undefined)
+    ?.split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const contextWindow = opts.contextWindow !== undefined ? Number(opts.contextWindow) : undefined;
+  if (contextWindow !== undefined && Number.isNaN(contextWindow)) {
+    console.error(chalk.red("--context-window must be a number (tokens)."));
+    process.exit(1);
+  }
   try {
     settings = resolveSettings({
       apiKey: opts.apiKey as string | undefined,
@@ -232,6 +254,8 @@ async function main(promptWords: string[] | undefined, opts: Record<string, unkn
       theme: opts.theme as string | undefined,
       promptColor: opts.color as string | undefined,
       mode: (opts.mode ?? opts.permissionMode) as PermissionMode | undefined,
+      allowedTools,
+      contextWindow,
     });
   } catch (e) {
     const missingKey = e instanceof Error && e.message.includes("No DeepSeek API key");
@@ -251,6 +275,8 @@ async function main(promptWords: string[] | undefined, opts: Record<string, unkn
         theme: opts.theme as string | undefined,
         promptColor: opts.color as string | undefined,
         mode: (opts.mode ?? opts.permissionMode) as PermissionMode | undefined,
+        allowedTools,
+        contextWindow,
       });
     } else {
       console.error(chalk.red((e as Error).message));
@@ -284,16 +310,18 @@ async function main(promptWords: string[] | undefined, opts: Record<string, unkn
 
   // One-off mode: `dsk "prompt"` — single agentic turn, then exit.
   if (promptWords && promptWords.length > 0) {
+    const userMsg: ChatMessage = { role: "user", content: promptWords.join(" ") };
+    const systemMsg: ChatMessage = { role: "system", content: buildSystemPrompt(process.cwd()) };
     const messages: ChatMessage[] = resumed
-      ? [...resumed, { role: "user", content: promptWords.join(" ") }]
-      : [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: promptWords.join(" ") },
-        ];
+      ? [...resumed, userMsg]
+      : [systemMsg, userMsg];
+    // Refresh the resumed session's system prompt so current project memory applies.
+    if (messages[0]?.role === "system") messages[0] = systemMsg;
     const prompter = isTTY ? createPrompter(true) : null;
     const gate = new PermissionGate({
       skipAll: Boolean(opts.dangerouslySkipPermissions),
       mode: settings.mode,
+      allowedTools: settings.allowedTools,
       ask: (q) => (prompter ? prompter.ask(q) : Promise.resolve("n")),
       isInteractive: Boolean(isTTY),
     });

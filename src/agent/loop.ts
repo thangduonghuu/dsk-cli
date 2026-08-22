@@ -3,6 +3,7 @@ import { chatStream, DskApiError, DskStreamError } from "./deepseekClient.js";
 import type { ChatMessage, StreamResult, ToolCall, ToolDef } from "./deepseekClient.js";
 import type { PermissionGate } from "../permissions.js";
 import type { Tool, ToolResult } from "./tools/index.js";
+import { compactMessages, contextInfo, summarizeConversation } from "../context.js";
 
 /** System prompt: how the agent should behave in the user's project. */
 export const SYSTEM_PROMPT = `You are dsk, a coding agent running inside a terminal in the user's project directory.
@@ -37,12 +38,18 @@ export interface AgentCallbacks {
   onCapped(): void;
   /** Called after each streamed model response with token usage, if provided. */
   onUsage?(usage: StreamResult["usage"]): void;
+  /** Fired once per turn when the estimated context usage crosses the warning threshold. */
+  onContextWarning?(info: { usedTokens: number; totalTokens: number; pct: number }): void;
+  /** Fired after older turns were summarized away to stay within the window. */
+  onContextCompact?(info: { summary: string; replacedMessages: number }): void;
 }
 
 export interface AgentTurnResult {
   iterations: number;
   capped: boolean;
   endedWithToolCalls: boolean;
+  /** True when the conversation was auto-compacted during this turn. */
+  compacted: boolean;
 }
 
 function parseToolArgs(call: ToolCall): unknown {
@@ -67,17 +74,54 @@ export async function runAgentTurn(opts: {
   callbacks: AgentCallbacks;
   maxIterations?: number;
   signal?: AbortSignal;
+  /** Fraction of the context window at which to warn (default 0.8). */
+  warnThreshold?: number;
+  /** Fraction at which to auto-compact (default 0.95). */
+  compactThreshold?: number;
 }): Promise<AgentTurnResult> {
-  const { settings, messages, tools, gate, callbacks, maxIterations = 25, signal } = opts;
+  const {
+    settings,
+    messages,
+    tools,
+    gate,
+    callbacks,
+    maxIterations = 25,
+    signal,
+    warnThreshold = 0.8,
+    compactThreshold = 0.95,
+  } = opts;
   const toolDefs: ToolDef[] = tools.map((t) => ({
     type: "function",
     function: { name: t.name, description: t.description, parameters: t.parameters },
   }));
 
   let iterations = 0;
+  let warned = false;
+  let compacted = false;
   // eslint-disable-next-line no-constant-condition
   while (true) {
     iterations += 1;
+
+    // Context management: warn once when the window fills up, and — before the
+    // first request of the turn, when nothing is mid-flight — summarize the
+    // older turns if we're about to overflow. Compaction is deliberately
+    // limited to that safe point: mid-loop the transcript may end with tool
+    // results whose assistant tool_calls must stay paired, so we never
+    // rearrange it while a tool loop is running.
+    const info = contextInfo(messages, settings.model, settings.contextWindow);
+    if (!warned && info.pct >= warnThreshold * 100) {
+      warned = true;
+      callbacks.onContextWarning?.(info);
+    }
+    if (iterations === 1 && !compacted && info.pct >= compactThreshold * 100 && messages.length >= 3) {
+      const res = await summarizeConversation(settings, messages);
+      if (res && res.replacedMessages > 0) {
+        compactMessages(messages, res.summary);
+        compacted = true;
+        callbacks.onContextCompact?.(res);
+      }
+    }
+
     callbacks.onIterationStart(iterations);
 
     let result: StreamResult | undefined;
@@ -115,7 +159,7 @@ export async function runAgentTurn(opts: {
     });
 
     if (result.toolCalls.length === 0) {
-      return { iterations, capped: false, endedWithToolCalls: false };
+      return { iterations, capped: false, endedWithToolCalls: false, compacted };
     }
 
     for (const call of result.toolCalls) {
@@ -127,7 +171,7 @@ export async function runAgentTurn(opts: {
         callbacks.onToolCall(call, tool);
         toolResult = await tool.execute(parseToolArgs(call), {
           cwd: process.cwd(),
-          requestPermission: (desc) => gate.ask(desc),
+          requestPermission: (desc, tool) => gate.ask(desc, tool),
         });
       }
       callbacks.onToolResult(call, toolResult);
@@ -136,7 +180,7 @@ export async function runAgentTurn(opts: {
 
     if (iterations >= maxIterations) {
       callbacks.onCapped();
-      return { iterations, capped: true, endedWithToolCalls: true };
+      return { iterations, capped: true, endedWithToolCalls: true, compacted };
     }
   }
 }

@@ -1,4 +1,4 @@
-import { stdin } from "node:process";
+import { stdin, stdout } from "node:process";
 import { emitKeypressEvents } from "node:readline";
 
 export interface KeyEvent {
@@ -8,6 +8,12 @@ export interface KeyEvent {
   meta: boolean;
   sequence: string;
 }
+
+/** Enable/disable bracketed paste so pasted newlines (\r) are distinguishable
+ * from the real Enter key. Node's readline reports the wrap markers as
+ * `paste-start` / `paste-end` key events. */
+const BRACKETED_PASTE_ON = "\x1b[?2004h";
+const BRACKETED_PASTE_OFF = "\x1b[?2004l";
 
 let initialized = false;
 
@@ -22,7 +28,10 @@ export function initKeyInput(): void {
     initialized = true;
     emitKeypressEvents(stdin);
   }
-  if (stdin.isTTY) stdin.setRawMode(true);
+  if (stdin.isTTY) {
+    stdin.setRawMode(true);
+    stdout.write(BRACKETED_PASTE_ON);
+  }
 }
 
 /** Subscribe to parsed key events. Returns an unsubscribe function. */
@@ -45,7 +54,10 @@ export function onKey(handler: (k: KeyEvent) => void): () => void {
   };
 }
 
-/** Turn raw mode back off (used on shutdown). */
+/** Turn raw mode and bracketed paste back off (used on shutdown). */
 export function restoreRawMode(): void {
-  if (stdin.isTTY) stdin.setRawMode(false);
+  if (stdin.isTTY) {
+    stdout.write(BRACKETED_PASTE_OFF);
+    stdin.setRawMode(false);
+  }
 }

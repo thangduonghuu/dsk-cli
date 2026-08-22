@@ -14,9 +14,10 @@ export interface ToolContext {
   cwd: string;
   /**
    * Called by mutating tools before executing. Returns true when the user
-   * approved (or auto-approve mode is on).
+   * approved (or auto-approve mode is on). Pass the tool name so allow/deny
+   * lists (`--allowed-tools`) can match on it.
    */
-  requestPermission: (description: string) => Promise<boolean>;
+  requestPermission: (description: string, tool?: string) => Promise<boolean>;
 }
 
 export interface ToolResult {

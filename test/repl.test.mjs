@@ -96,7 +96,7 @@ test("interactive REPL: slash command, permission prompt, agent turn, save-on-ex
 
   assert.equal(code, 0, `stderr: ${stderr}`);
   assert.ok(stdout.includes("dsk v0.1.0"), `banner missing: ${stdout}`);
-  assert.ok(stdout.includes("/clear                 reset the conversation"), `help missing: ${stdout}`);
+  assert.ok(stdout.includes("/clear                 clear the screen and reset the conversation"), `help missing: ${stdout}`);
   assert.ok(stdout.includes("─ Running echo hi"), `tool line missing: ${stdout}`);
   assert.ok(stdout.includes("Allow bash"), `permission prompt missing: ${stdout}`);
   assert.ok(stdout.includes("final answer"), `agent text missing: ${stdout}`);
@@ -281,6 +281,183 @@ test("REPL /diff shows the last edit as a unified diff", async () => {
   assert.ok(stdout.includes("─ diff: notes.txt"), `diff header missing: ${stdout}`);
   assert.ok(stdout.includes("@@ -"), `hunk header missing: ${stdout}`);
   assert.ok(stdout.includes("- two") && stdout.includes("+ TWO"), `hunk body missing: ${stdout}`);
+
+  // The diff is rendered inline right after the edit result (before /diff runs).
+  const editIdx = stdout.indexOf("Edit applied: notes.txt");
+  const inlineIdx = stdout.indexOf("─ diff: notes.txt");
+  assert.ok(editIdx !== -1 && inlineIdx !== -1 && editIdx < inlineIdx, "diff shown inline after the edit result");
+  assert.ok(
+    stdout.indexOf("─ diff: notes.txt", inlineIdx + 1) > inlineIdx,
+    "/diff still prints its own full view"
+  );
+
+  rmSync(work, { recursive: true, force: true });
+});
+
+test("REPL /sessions lists saved sessions and deletes by number", async () => {
+  const work = mkdtempSync(join(ROOT, ".test-repl-"));
+  const home = join(work, "home");
+  mkdirSync(join(home, ".dsk"), { recursive: true });
+
+  const api = await mockApi((ctx, res) => {
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.write(sse({ choices: [{ delta: { content: "plain answer" } }] }));
+    res.end();
+  });
+
+  // Create a session with a one-off turn.
+  const first = await runCli(
+    ["--base-url", api.url, "hello"],
+    { HOME: home, DEEPSEEK_API_KEY: "repl-test-key" },
+    work
+  );
+  assert.equal(first.code, 0, first.stderr);
+  assert.equal(readdirSync(join(home, ".dsk", "sessions")).length, 1);
+
+  // List sessions in the REPL and delete #1.
+  const second = await runCli(
+    ["--base-url", api.url],
+    { HOME: home, DEEPSEEK_API_KEY: "repl-test-key" },
+    work,
+    "/sessions\n1\n/exit\n"
+  );
+  await api.close();
+
+  assert.equal(second.code, 0, `stderr: ${second.stderr}`);
+  assert.ok(second.stdout.includes("Saved sessions"), `session list missing: ${second.stdout}`);
+  assert.ok(second.stdout.includes("Deleted session"), `delete confirmation missing: ${second.stdout}`);
+  assert.equal(readdirSync(join(home, ".dsk", "sessions")).length, 0, "session file should be gone");
+
+  rmSync(work, { recursive: true, force: true });
+});
+
+test("prompt history persists to ~/.dsk/history.json across runs", async () => {
+  const work = mkdtempSync(join(ROOT, ".test-repl-"));
+  const home = join(work, "home");
+  mkdirSync(join(home, ".dsk"), { recursive: true });
+
+  const api = await mockApi((ctx, res) => {
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.write(sse({ choices: [{ delta: { content: "ok" } }] }));
+    res.end();
+  });
+
+  const first = await runCli(
+    ["--base-url", api.url],
+    { HOME: home, DEEPSEEK_API_KEY: "repl-test-key" },
+    work,
+    "remember me\n/exit\n"
+  );
+  assert.equal(first.code, 0, first.stderr);
+
+  const hist = JSON.parse(readFileSync(join(home, ".dsk", "history.json"), "utf8"));
+  assert.deepEqual(hist, ["remember me"]);
+
+  // Second run: a fresh prompt is appended, the old one retained.
+  const second = await runCli(
+    ["--base-url", api.url],
+    { HOME: home, DEEPSEEK_API_KEY: "repl-test-key" },
+    work,
+    "second prompt\n/exit\n"
+  );
+  await api.close();
+  assert.equal(second.code, 0, second.stderr);
+  const hist2 = JSON.parse(readFileSync(join(home, ".dsk", "history.json"), "utf8"));
+  assert.deepEqual(hist2, ["remember me", "second prompt"]);
+
+  rmSync(work, { recursive: true, force: true });
+});
+
+test("REPL /init generates a DSK.md project memory file", async () => {
+  const work = mkdtempSync(join(ROOT, ".test-repl-"));
+  const home = join(work, "home");
+  mkdirSync(join(home, ".dsk"), { recursive: true });
+
+  const api = await mockApi((ctx, res) => {
+    const last = ctx.body.messages[ctx.body.messages.length - 1];
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    if (last?.role === "tool") {
+      res.write(sse({ choices: [{ delta: { content: "done writing memory" } }] }));
+    } else {
+      res.write(
+        sse({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_init",
+                    function: {
+                      name: "write_file",
+                      arguments: JSON.stringify({ path: "DSK.md", content: "# My Project\n\nBuild with `npm test`.\n" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        })
+      );
+    }
+    res.end();
+  });
+
+  const { code, stdout, stderr } = await runCli(
+    ["--base-url", api.url],
+    { HOME: home, DEEPSEEK_API_KEY: "repl-test-key" },
+    work,
+    "/init\n/exit\n"
+  );
+  await api.close();
+
+  assert.equal(code, 0, `stderr: ${stderr}`);
+  assert.ok(readFileSync(join(work, "DSK.md"), "utf8").includes("# My Project"), "DSK.md should be written");
+  assert.ok(stdout.includes("DSK.md is now loaded as project memory"), stdout);
+
+  rmSync(work, { recursive: true, force: true });
+});
+
+test("--allowed-tools auto-approves matching tools even in default mode", async () => {
+  const work = mkdtempSync(join(ROOT, ".test-repl-"));
+  const home = join(work, "home");
+  mkdirSync(join(home, ".dsk"), { recursive: true });
+
+  const api = await mockApi((ctx, res) => {
+    const last = ctx.body.messages[ctx.body.messages.length - 1];
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    if (last?.role === "tool") {
+      res.write(sse({ choices: [{ delta: { content: "done" } }] }));
+    } else {
+      res.write(
+        sse({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  { index: 0, id: "call_4", function: { name: "bash", arguments: '{"command": "echo hi"}' } },
+                ],
+              },
+            },
+          ],
+        })
+      );
+    }
+    res.end();
+  });
+
+  // --mode default would normally prompt for bash; --allowed-tools bash skips it.
+  const { code, stdout, stderr } = await runCli(
+    ["--base-url", api.url, "--mode", "default", "--allowed-tools", "bash"],
+    { HOME: home, DEEPSEEK_API_KEY: "repl-test-key" },
+    work,
+    "/help\nhello\n/exit\n"
+  );
+  await api.close();
+
+  assert.equal(code, 0, `stderr: ${stderr}`);
+  assert.ok(stdout.includes("✓ Command finished: echo hi"), `tool ran without prompt: ${stdout}`);
+  assert.ok(!stdout.includes("Allow bash"), "allowlisted tool must not prompt");
 
   rmSync(work, { recursive: true, force: true });
 });

@@ -30,7 +30,7 @@ export const writeFileTool: Tool = {
       return { ok: false, output: `Invalid arguments: ${(e as Error).message}` };
     }
     const filePath = resolve(ctx.cwd, args.path);
-    const allowed = await ctx.requestPermission(`write_file: ${args.path}`);
+    const allowed = await ctx.requestPermission(`write_file: ${args.path}`, "write_file");
     if (!allowed) {
       return { ok: false, output: "Permission denied by the user — file was not written." };
     }

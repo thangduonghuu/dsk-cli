@@ -211,13 +211,19 @@ def main():
     print("\n=== AFTER /help (full screen) ===")
     print(screen.dump())
 
-    # 3) type a few chars to re-render the prompt block (no submit)
+    # 3) /clear wipes the conversation AND the terminal screen/scrollback
+    os.write(fd, b"/clear\r")
+    drain(0.4)
+    print("\n=== AFTER /clear (only 'Conversation cleared.' + prompt block remain) ===")
+    print(screen.dump())
+
+    # 4) type a few chars to re-render the prompt block (no submit)
     os.write(fd, b"abc")
     drain(0.4)
     print("\n=== AFTER typing 'abc' ===")
     print(screen.dump())
 
-    # 4) multiline input: backslash + Enter inserts a newline; block grows
+    # 5) multiline input: backslash + Enter inserts a newline; block grows
     os.write(fd, b"\\\r")
     drain(0.3)
     os.write(fd, b"xyz")
@@ -225,13 +231,13 @@ def main():
     print("\n=== AFTER multiline (abc\\ + xyz) ===")
     print(screen.dump())
 
-    # 5) Shift+Tab cycles permission mode -> toast line appears above the input
+    # 6) Shift+Tab cycles permission mode -> toast line appears above the input
     os.write(fd, b"\x1b[Z")
     drain(0.3)
     print("\n=== AFTER shift+tab (toast) ===")
     print(screen.dump())
 
-    # 6) exit: Ctrl+C clears the draft, Ctrl+C again exits
+    # 7) exit: Ctrl+C clears the draft, Ctrl+C again exits
     os.write(fd, b"\x03")
     drain(0.3)
     print("\n=== AFTER first ctrl+c ===")

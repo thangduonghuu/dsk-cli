@@ -5,11 +5,14 @@ import type { EffectiveSettings } from "./config.js";
 import { saveConfig } from "./config.js";
 import type { ChatMessage, ToolCall } from "./agent/deepseekClient.js";
 import { DskApiError, DskStreamError } from "./agent/deepseekClient.js";
-import { runAgentTurn, SYSTEM_PROMPT } from "./agent/loop.js";
+import { runAgentTurn } from "./agent/loop.js";
 import { allTools } from "./agent/tools/index.js";
 import { bashTool } from "./agent/tools/bash.js";
 import { PermissionGate, PERMISSION_MODES, type PermissionMode } from "./permissions.js";
-import { saveSession } from "./session.js";
+import { deleteSession, listSessions, saveSession } from "./session.js";
+import { appendHistory, loadHistory } from "./history.js";
+import { buildSystemPrompt, loadMemoryFile, MEMORY_FILE_NAME } from "./memory.js";
+import { compactMessages, contextInfo, contextWindowFor, summarizeConversation } from "./context.js";
 import { createPrompter } from "./input.js";
 import { fetchModels, KNOWN_MODELS } from "./models.js";
 import { initKeyInput, onKey, restoreRawMode } from "./ui/keys.js";
@@ -62,11 +65,22 @@ export interface ReplOptions {
 
 const ALT_SCREEN_IN = "\x1b[?1049h\x1b[2J\x1b[H";
 const ALT_SCREEN_OUT = "\x1b[?1049l";
+/** Wipe scrollback + visible screen and move the cursor home (used by /clear).
+ * ED 3 clears the scrollback, ED 2 the visible screen; terminals that don't
+ * support ED 3 ignore it, so sending both is safe. */
+const CLEAR_SCREEN = "\x1b[3J\x1b[2J\x1b[H";
 
 /** Interactive REPL: prompt loop, slash commands, streamed agent turns. */
 export async function startRepl(opts: ReplOptions): Promise<void> {
   const { settings } = opts;
-  const messages: ChatMessage[] = opts.messages ?? [{ role: "system", content: SYSTEM_PROMPT }];
+  const cwd = process.cwd();
+  const systemPrompt = buildSystemPrompt(cwd);
+  const messages: ChatMessage[] = opts.messages ?? [{ role: "system", content: systemPrompt }];
+  // A resumed session carries its own (stale) system message — refresh it so
+  // the current project memory is always in effect.
+  if (messages.length > 0 && messages[0]?.role === "system") {
+    messages[0] = { role: "system", content: systemPrompt };
+  }
   let sessionId = opts.sessionId;
   let aborter: AbortController | null = null;
   const tty = Boolean(stdin.isTTY && stdout.isTTY);
@@ -189,14 +203,14 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
     editor = new Editor(
       {
         footer: () => buildFooter(state, palette),
-        complete: (text, cursor) => completeInput(text, cursor, process.cwd()),
+        complete: (text, cursor) => completeInput(text, cursor, cwd),
         contStyle: (s) => palette.dim(s),
         onShiftTab: () => cycleMode(),
         onCtrlC: () => handleCtrlC(),
         onCtrlD: () => handleCtrlC(),
         onCtrlO: () => void viewTranscript(),
       },
-      []
+      loadHistory() // persistent prompt history across sessions
     );
     // While a turn is running: Esc / Ctrl+C aborts it (and unblocks a prompt).
     stopTurnKeys = onKey((k) => {
@@ -220,6 +234,7 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
   const gate = new PermissionGate({
     skipAll: opts.skipAll,
     mode: settings.mode,
+    allowedTools: settings.allowedTools,
     // The REPL is interactive by design; piped stdin still answers prompts line
     // by line through the prompter (one-off mode is where non-TTY fails closed).
     isInteractive: true,
@@ -292,7 +307,16 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
               const line = summarizeTool(call.name, parseArgs(call), result, palette);
               console.log(line);
               turnState.rec?.tools.push(line);
-              if (result.diff) uiState.lastDiff = result.diff;
+              if (result.diff) {
+                uiState.lastDiff = result.diff;
+                // Visually show the added/removed lines right after the change
+                // (edit_file / write_file), like Claude Code's inline diff.
+                if (result.diff.hunks.length > 0 && (call.name === "edit_file" || call.name === "write_file")) {
+                  const diffText = renderDiff(result.diff.path, result.diff.hunks, palette, { maxLines: 40 });
+                  console.log(diffText);
+                  turnState.rec?.tools.push(diffText);
+                }
+              }
             },
             onCapped: () => {
               stopSpinner();
@@ -304,6 +328,21 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
                 state.tokensOut += usage.completionTokens;
                 state.costCents += costFromUsage(settings.model, usage.promptTokens, usage.completionTokens);
               }
+              state.ctxPct = contextInfo(messages, settings.model, settings.contextWindow).pct;
+            },
+            onContextWarning: (info) => {
+              stopSpinner();
+              console.log(
+                palette.warn(`⚠ Context is ${info.pct}% full (${info.usedTokens}/${info.totalTokens} tokens est.) — the conversation will be summarized if it keeps growing.`)
+              );
+            },
+            onContextCompact: (info) => {
+              stopSpinner();
+              console.log(
+                palette.dim(
+                  `— Context compacted: ${info.replacedMessages} earlier message(s) summarized to continue within the window. Run /compact manually anytime.`
+                )
+              );
             },
           },
         });
@@ -362,6 +401,9 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
     if (answer === null) break; // EOF on piped stdin
     const line = answer.trim();
     if (line === "") continue;
+    // Persistent history across sessions: natural-language prompts only (skip
+    // slash commands and `!cmd` shell lines, which are noise on recall).
+    if (!line.startsWith("/") && !line.startsWith("!")) appendHistory(line);
 
     if (line.startsWith("/")) {
       const [cmd, ...rest] = line.slice(1).split(/\s+/);
@@ -370,11 +412,14 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
           console.log(
             [
               "/help                  show this help",
-              "/clear                 reset the conversation",
+              "/clear                 clear the screen and reset the conversation",
               "/model [name]          list every model to pick, or switch directly (/model deepseek-v4-pro)",
               "/config                show current configuration",
               "/usage                 show token usage and cost for this session",
               "/diff                  show the last file change as a unified diff",
+              "/sessions              list saved sessions and delete one",
+              "/init                  generate a DSK.md project-memory file for this repo",
+              "/compact               summarize older turns to free up context window",
               "/theme [name]          switch UI theme (default | ocean | mono)",
               "/color [name]          set the prompt-bar color",
               "/mode [mode]           show or set permission mode (shift+tab cycles)",
@@ -388,7 +433,9 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
           break;
         case "clear":
           messages.length = 0;
-          messages.push({ role: "system", content: SYSTEM_PROMPT });
+          messages.push({ role: "system", content: buildSystemPrompt(cwd) });
+          transcript.length = 0; // Ctrl+O viewer should start fresh too
+          if (tty) stdout.write(CLEAR_SCREEN);
           console.log(palette.dim("Conversation cleared."));
           break;
         case "model": {
@@ -439,10 +486,12 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
               `base_url:         ${settings.baseUrl}`,
               `api_key:          ${maskKey(settings.apiKey)}`,
               `max_tokens:       ${settings.maxTokens ?? "(default)"}`,
+              `context_window:   ${settings.contextWindow ?? "(auto)"}`,
+              `allowed_tools:    ${settings.allowedTools?.join(", ") ?? "(none)"}`,
               `theme:            ${settings.theme ?? "default"}`,
               `prompt_color:     ${settings.promptColor ?? "default"}`,
               `mode:             ${state.mode}`,
-              `tokens:           ${state.tokensIn} in · ${state.tokensOut} out · $${(state.costCents / 100).toFixed(4)}`,
+              `tokens:           ${state.tokensIn} in · ${state.tokensOut} out · ${(state.costCents / 100).toFixed(4)}`,
             ].join("\n")
           );
           break;
@@ -459,6 +508,92 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
           }
           console.log(renderDiff(d.path, d.hunks, palette));
           break;
+        case "sessions": {
+          const sessions = listSessions();
+          if (sessions.length === 0) {
+            console.log(palette.dim("No saved sessions yet."));
+            break;
+          }
+          console.log("Saved sessions:");
+          sessions.forEach((s, i) => {
+            console.log(
+              `  ${palette.tool(String(i + 1))}. ${s.id}  ${palette.dim(`${s.createdAt} · ${s.model} · ${s.messages.length} messages`)}`
+            );
+          });
+          const answer = await ask(palette.dim("Delete one by number or id (Enter keeps all): "), {
+            multiline: false,
+          });
+          if (!answer) break;
+          const pickedRaw = answer.trim();
+          if (!pickedRaw) break;
+          const n = Number(pickedRaw);
+          const target = Number.isInteger(n) && n >= 1 && n <= sessions.length
+            ? sessions[n - 1]
+            : sessions.find((s) => s.id === pickedRaw);
+          if (!target) {
+            console.log(palette.warn(`No session matches "${pickedRaw}".`));
+            break;
+          }
+          deleteSession(target.id);
+          console.log(palette.dim(`Deleted session ${target.id}.`));
+          break;
+        }
+        case "init": {
+          const existing = loadMemoryFile(cwd);
+          if (existing) {
+            console.log(
+              palette.warn(
+                `${MEMORY_FILE_NAME} already exists in this directory — edit it directly, or delete it and run /init again.`
+              )
+            );
+            break;
+          }
+          messages.push({
+            role: "user",
+            content:
+              `Analyze this repository: its structure, build tooling, test commands, architecture, and conventions.\n\n` +
+              `Then create a file named ${MEMORY_FILE_NAME} at the repository root using write_file. It should contain:\n` +
+              `1. A one-line description of the project.\n` +
+              `2. Common commands: build, test, lint, dev, etc. (exact, from the actual tooling).\n` +
+              `3. A short architecture overview (key directories and how they fit together).\n` +
+              `4. Coding conventions you observed.\n` +
+              `5. Common development tasks.\n\n` +
+              `Keep it under 120 lines, plain markdown, concise. Only state things you verified by reading the repo.`,
+          });
+          turnState.rec = { user: "/init", tools: [], assistant: "" };
+          await runTurn();
+          state.turns += 1;
+          state.elapsedMs = Date.now() - sessionStart;
+          if (turnState.rec) {
+            transcript.push(turnState.rec);
+            if (transcript.length > 20) transcript.shift();
+          }
+          turnState.rec = null;
+          // Pick up the freshly written memory file for the rest of the session.
+          messages[0] = { role: "system", content: buildSystemPrompt(cwd) };
+          sessionId = saveSession({ id: sessionId, model: settings.model, messages });
+          console.log(palette.dim(`Done. ${MEMORY_FILE_NAME} is now loaded as project memory.`));
+          break;
+        }
+        case "compact": {
+          if (messages.length <= 2) {
+            console.log(palette.dim("Nothing to compact yet — the conversation is short."));
+            break;
+          }
+          if (messages[messages.length - 1]?.role === "tool") {
+            console.log(palette.warn("Can't compact mid-turn — wait for the current turn to finish."));
+            break;
+          }
+          console.log(palette.dim("Summarizing earlier turns…"));
+          const res = await summarizeConversation(settings, messages);
+          if (!res) {
+            console.log(palette.warn("Compaction failed (API error?) — the conversation is unchanged."));
+            break;
+          }
+          const dropped = compactMessages(messages, res.summary);
+          console.log(palette.success(`✓ Compacted ${dropped} earlier message(s) into a summary.`));
+          break;
+        }
         case "theme": {
           const name = rest.join(" ").trim();
           const pick = async (): Promise<string | null> => {

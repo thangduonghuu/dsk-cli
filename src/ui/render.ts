@@ -241,16 +241,33 @@ function diffStatsOf(diff: { path: string; hunks: DiffHunk[] } | undefined): str
   return "";
 }
 
+export interface RenderDiffOptions {
+  /** Cap the number of rendered lines (header + hunks); truncates with a note. */
+  maxLines?: number;
+}
+
 /** Render a unified diff for the /diff viewer (green +, red −, dim context). */
-export function renderDiff(path: string, hunks: DiffHunk[], palette: Palette): string {
+export function renderDiff(path: string, hunks: DiffHunk[], palette: Palette, opts: RenderDiffOptions = {}): string {
   const out: string[] = [palette.tool(`─ diff: ${path}`)];
-  for (const h of hunks) {
+  const maxLines = opts.maxLines ?? Infinity;
+  let truncated = false;
+  outer: for (const h of hunks) {
+    if (out.length >= maxLines) {
+      truncated = true;
+      break;
+    }
     out.push(palette.dim(`@@ -${h.oldStart},${h.oldCount} +${h.newStart},${h.newCount} @@`));
     for (const l of h.lines) {
+      if (out.length >= maxLines) {
+        truncated = true;
+        break outer;
+      }
       if (l.kind === "add") out.push(palette.success("+ " + l.text));
       else if (l.kind === "del") out.push(palette.error("- " + l.text));
       else out.push(palette.dim("  " + l.text));
     }
   }
-  return out.join("\n");
+  let text = out.join("\n");
+  if (truncated) text += "\n" + palette.dim("… diff truncated — run /diff for the full view");
+  return text;
 }

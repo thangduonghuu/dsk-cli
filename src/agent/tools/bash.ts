@@ -33,7 +33,7 @@ export const bashTool: Tool = {
     // The FULL command is the permission identity (the gate truncates only
     // what is displayed), so "always" can never auto-approve a different
     // command that merely shares a long prefix.
-    const allowed = await ctx.requestPermission(`bash: ${args.command}`);
+    const allowed = await ctx.requestPermission(`bash: ${args.command}`, "bash");
     if (!allowed) {
       return { ok: false, output: "Permission denied by the user — command was not run." };
     }

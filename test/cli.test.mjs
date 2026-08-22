@@ -156,3 +156,40 @@ test("one-off mode executes mutating tools (write_file + bash) with auto-approve
 
   rmSync(work, { recursive: true, force: true });
 });
+
+test("DSK.md project memory is injected into the system prompt", async () => {
+  const work = mkdtempSync(join(ROOT, ".test-work-"));
+  const home = join(work, "home");
+  mkdirSync(join(home, ".dsk"), { recursive: true });
+  writeFileSync(join(work, "DSK.md"), "# Conventions\n\nAlways run `npm run lint` before committing.\n");
+
+  const requests = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
+      const parsed = JSON.parse(body);
+      requests.push(parsed);
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.write(sse({ choices: [{ delta: { content: "noted" } }] }));
+      res.end();
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${server.address().port}`;
+
+  const { code } = await runCli(
+    ["--base-url", url, "what are the conventions?"],
+    { HOME: home, DEEPSEEK_API_KEY: "cli-test-key" },
+    work
+  );
+  await new Promise((r) => server.close(r));
+
+  assert.equal(code, 0);
+  assert.equal(requests.length, 1);
+  const sys = requests[0].messages.find((m) => m.role === "system");
+  assert.ok(sys.content.includes("Always run `npm run lint` before committing."), "memory must be in the system prompt");
+  assert.ok(sys.content.includes("# Project memory — DSK.md"), sys.content);
+
+  rmSync(work, { recursive: true, force: true });
+});

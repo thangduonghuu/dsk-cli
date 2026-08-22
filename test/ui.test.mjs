@@ -8,7 +8,7 @@ import { lineDiffStats, formatK, formatElapsed } from "../dist/ui/diff.js";
 import { createStreamStyler } from "../dist/ui/markdown.js";
 import { getPalette } from "../dist/ui/theme.js";
 import { costFromUsage, buildFooter } from "../dist/ui/footer.js";
-import { renderBanner, summarizeTool, toolCallLine } from "../dist/ui/render.js";
+import { renderBanner, renderDiff, summarizeTool, toolCallLine } from "../dist/ui/render.js";
 import { PermissionGate, PERMISSION_MODES } from "../dist/permissions.js";
 import { Editor } from "../dist/ui/editor.js";
 
@@ -175,6 +175,209 @@ test("permission modes: bypassPermissions approves everything", async () => {
 
 test("PERMISSION_MODES cycle order matches the doc", () => {
   assert.deepEqual(PERMISSION_MODES, ["default", "acceptEdits", "plan", "bypassPermissions"]);
+});
+
+test("allowedTools auto-approves matching tools without prompting", async () => {
+  let asked = 0;
+  const gate = new PermissionGate({
+    skipAll: false,
+    mode: "default",
+    allowedTools: ["bash", "edit_file"],
+    ask: async () => {
+      asked += 1;
+      return "n";
+    },
+    isInteractive: true,
+  });
+  assert.equal(await gate.ask("bash: npm test", "bash"), true);
+  assert.equal(await gate.ask("edit_file: src/a.ts", "edit_file"), true);
+  // Tools not on the list still prompt (and here get denied).
+  assert.equal(await gate.ask("write_file: src/b.ts", "write_file"), false);
+  assert.equal(asked, 1, "only the non-allowlisted tool prompted");
+});
+
+test("deniedTools overrides the allowlist and the mode", async () => {
+  const gate = new PermissionGate({
+    skipAll: false,
+    mode: "bypassPermissions",
+    allowedTools: ["bash"],
+    deniedTools: ["bash"],
+    ask: async () => "y",
+    isInteractive: true,
+  });
+  // bypassPermissions normally approves everything, but deniedTools wins.
+  assert.equal(await gate.ask("bash: rm -rf /", "bash"), false);
+});
+
+test("allowlist matching falls back to prompting when the tool name is unknown", async () => {
+  let asked = 0;
+  const gate = new PermissionGate({
+    skipAll: false,
+    mode: "default",
+    allowedTools: ["bash"],
+    ask: async () => {
+      asked += 1;
+      return "y";
+    },
+    isInteractive: true,
+  });
+  assert.equal(await gate.ask("web_fetch: https://x", "web_fetch"), true);
+  assert.equal(asked, 1, "unknown tools still go through the permission prompt");
+});
+
+test("renderDiff truncates long diffs with a hint, uncapped renders fully", () => {
+  const lines = Array.from({ length: 100 }, (_, i) => `line ${i}`);
+  const hunks = [
+    { oldStart: 1, oldCount: 100, newStart: 1, newCount: 100, lines: lines.map((t) => ({ kind: "add", text: t })) },
+  ];
+
+  const capped = renderDiff("big.txt", hunks, palette, { maxLines: 6 });
+  const cappedLines = capped.split("\n");
+  assert.ok(cappedLines.length <= 7, `capped to maxLines + hint: ${cappedLines.length}`);
+  assert.ok(capped.includes("run /diff"), "truncation hint present");
+  assert.ok(capped.includes("+ line 0"), "first added line visible");
+
+  const full = renderDiff("big.txt", hunks, palette);
+  assert.ok(full.split("\n").length > 100, "uncapped renders all lines");
+  assert.ok(!full.includes("run /diff"), "no hint when nothing is truncated");
+});
+
+test("editor: live suggestion popup while typing / commands, Tab inserts and cycles", async () => {
+  const prevRows = process.stdout.rows;
+  const prevCols = process.stdout.columns;
+  process.stdout.rows = 12;
+  process.stdout.columns = 64;
+
+  const realWrite = process.stdout.write.bind(process.stdout);
+  const out = [];
+  process.stdout.write = (chunk, ...rest) => {
+    out.push(String(chunk));
+    return realWrite(chunk, ...rest);
+  };
+
+  const COMMANDS = ["help", "clear", "model", "config", "exit", "usage", "diff", "theme", "color", "mode"];
+  const tick = () => new Promise((r) => setTimeout(r, 15));
+  try {
+    const editor = new Editor(
+      {
+        footer: () => "────\nSTATUS",
+        complete: async (text, cursor) => {
+          const tok = text.slice(0, cursor).replace(/^.*\n/, "").slice(1).toLowerCase();
+          const matches = COMMANDS.filter((c) => c.startsWith(tok)).map((c) => `/${c}`);
+          return matches.length ? { start: 0, end: cursor, matches } : null;
+        },
+      },
+      []
+    );
+    const p = editor.ask("❯ ");
+    const all = () => out.join("");
+    // Content of the most recent render only (accumulated output holds stale
+    // frames from earlier keystrokes).
+    const lastRender = () => all().split("\x1b[?25l").pop() ?? "";
+
+    // Typing "/" pops up the full command list above the input.
+    process.stdin.emit("keypress", "/", { name: "/", ctrl: false, shift: false, meta: false, sequence: "/" });
+    await tick();
+    assert.ok(all().includes("❯ /"), "slash typed");
+    assert.ok(all().includes("/help"), "suggestion list shown");
+    assert.ok(all().includes("/theme"), "windowed list covers most commands");
+
+    // Narrowing to "/mo" filters the popup to model + mode.
+    process.stdin.emit("keypress", "m", { name: "m", ctrl: false, shift: false, meta: false, sequence: "m" });
+    process.stdin.emit("keypress", "o", { name: "o", ctrl: false, shift: false, meta: false, sequence: "o" });
+    await tick();
+    assert.ok(lastRender().includes("/model") && lastRender().includes("/mode"), "popup filtered to /model /mode");
+    assert.ok(!lastRender().includes("/help"), "non-matching commands hidden");
+
+    // The popup grows the block upward (still pinned to the bottom): input row
+    // sits above the 2-line footer, with 2 suggestion rows above it.
+    assert.ok(lastRender().includes("❯ /mo\n────\nSTATUS"), "input + footer flush at the bottom");
+
+    // Tab inserts the highlighted match and cycles to the next candidate.
+    process.stdin.emit("keypress", "\t", { name: "tab", ctrl: false, shift: false, meta: false, sequence: "\t" });
+    await tick();
+    assert.ok(lastRender().includes("❯ /model"), "Tab inserts first match");
+    process.stdin.emit("keypress", "\t", { name: "tab", ctrl: false, shift: false, meta: false, sequence: "\t" });
+    await tick();
+    assert.ok(lastRender().includes("❯ /mode"), "second Tab cycles to the next match");
+
+    // Typing past the prefix dismisses the popup (nothing matches "modex").
+    process.stdin.emit("keypress", "x", { name: "x", ctrl: false, shift: false, meta: false, sequence: "x" });
+    await tick();
+    assert.ok(lastRender().includes("❯ /modex"), "typing keeps working after cycling");
+    assert.ok(!lastRender().includes("❯ /model"), "popup dismissed when nothing matches");
+
+    editor.interrupt();
+    await p;
+    editor.close();
+  } finally {
+    process.stdout.write = realWrite;
+    process.stdout.rows = prevRows;
+    process.stdout.columns = prevCols;
+  }
+});
+
+test("editor: bracketed paste buffers text (newlines don't submit) until Enter", async () => {
+  const prevRows = process.stdout.rows;
+  const prevCols = process.stdout.columns;
+  process.stdout.rows = 12;
+  process.stdout.columns = 64;
+
+  const realWrite = process.stdout.write.bind(process.stdout);
+  const out = [];
+  process.stdout.write = (chunk, ...rest) => {
+    out.push(String(chunk));
+    return realWrite(chunk, ...rest);
+  };
+
+  const emit = (str, name, sequence = str) =>
+    process.stdin.emit("keypress", str, { name, ctrl: false, shift: false, meta: false, sequence });
+
+  try {
+    const editor = new Editor({ footer: () => "────\nSTATUS" }, []);
+    const resolved = [];
+    const p = editor.ask("❯ ");
+    p.then((v) => resolved.push(v));
+    const all = () => out.join("");
+
+    // Simulate a bracketed paste with CR newlines (what terminals actually
+    // send) plus a trailing blank line: `paste-start` … `paste-end`.
+    emit("\x1b[200~", "paste-start");
+    for (const ch of "line1\rline2\r\n") emit(ch, ch === "\r" || ch === "\n" ? "return" : ch);
+    emit("\x1b[201~", "paste-end");
+
+    // The prompt must NOT have submitted: nothing resolved yet.
+    assert.equal(resolved.length, 0, "paste must not submit the prompt");
+    assert.ok(all().includes("❯ line1\n  │ line2"), "pasted lines become a multiline buffer");
+
+    // A real Enter now submits the whole pasted block (trailing newline trimmed).
+    emit("\r", "return");
+    const value = await p;
+    assert.equal(value, "line1\nline2", "submitted value is the full pasted block");
+    assert.equal(resolved.length, 1, "promise resolved exactly once");
+
+    editor.close();
+  } finally {
+    process.stdout.write = realWrite;
+    process.stdout.rows = prevRows;
+    process.stdout.columns = prevCols;
+  }
+});
+
+test("editor: plain Enter still submits immediately (no paste)", async () => {
+  const realWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk, ...rest) => realWrite(chunk, ...rest);
+  try {
+    const editor = new Editor({ footer: () => "────\nSTATUS" }, []);
+    const p = editor.ask("❯ ");
+    process.stdin.emit("keypress", "h", { name: "h", ctrl: false, shift: false, meta: false, sequence: "h" });
+    process.stdin.emit("keypress", "i", { name: "i", ctrl: false, shift: false, meta: false, sequence: "i" });
+    process.stdin.emit("keypress", "\r", { name: "return", ctrl: false, shift: false, meta: false, sequence: "\r" });
+    assert.equal(await p, "hi");
+    editor.close();
+  } finally {
+    process.stdout.write = realWrite;
+  }
 });
 
 test("editor: prompt block pinned flush to the bottom with absolute positioning", async () => {

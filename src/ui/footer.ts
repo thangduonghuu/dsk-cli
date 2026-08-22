@@ -19,6 +19,8 @@ export interface FooterState {
   turns: number;
   branch?: string;
   dirty?: boolean;
+  /** Estimated context-window usage percent (0-100+), shown when > 0. */
+  ctxPct?: number;
 }
 
 const MODE_LABEL: Record<PermissionMode, string> = {
@@ -42,6 +44,7 @@ export function costFromUsage(model: string, promptTokens: number, completionTok
 export function buildFooter(state: FooterState, palette: Palette): string {
   const parts: string[] = [];
   parts.push(`⚡ ${formatK(state.tokensIn)} in · ${formatK(state.tokensOut)} out`);
+  if (state.ctxPct !== undefined && state.ctxPct > 0) parts.push(`ctx ${state.ctxPct}%`);
   if (state.costCents > 0.004) parts.push(`$${(state.costCents / 100).toFixed(3)}`);
   if (state.branch) parts.push(state.dirty ? `${state.branch}*` : state.branch);
   if (state.elapsedMs > 0) parts.push(formatElapsed(state.elapsedMs));

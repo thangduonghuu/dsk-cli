@@ -51,14 +51,20 @@ token-by-token to your terminal.
   is on.
 - **Agentic tool loop** — the model can read files, edit code, run tests, and
   keep going in one turn (capped at 25 iterations).
+- **Inline file diffs** — every `edit_file` / `write_file` is followed by a
+  colored diff right in the transcript (green `+` additions, red `−` removals,
+  dim context), capped at 40 lines with a hint to run `/diff` for the full view.
 - **7 core tools** — `read_file`, `write_file`, `edit_file`, `list_dir`,
   `glob`, `grep` (ripgrep when available), `bash`.
 - **No permission prompts by default** — tools run automatically, like
   DeepSeek's own chat UI. Cycle `default → acceptEdits → plan →
   bypassPermissions` with **Shift+Tab**, or set one with `/mode` / `--mode`.
 - **Rich prompt editing** — multiline input (`\` + Enter / Ctrl+J), command
-  history (↑/↓), `/`-command and `@`-file-path completion (Tab), `!cmd` shell
-  mode, Ctrl+A/E/U/K/W editing, Esc to interrupt a turn.
+  history (↑/↓), **live suggestions as you type `/` commands or `@` file paths**
+  (Tab cycles the dropdown and inserts the highlighted match), **bracketed
+  paste — pasting multi-line text buffers it as a multiline prompt and only
+  submits when you press Enter**, `!cmd` shell mode, Ctrl+A/E/U/K/W editing,
+  Esc to interrupt a turn.
 - **Session persistence** — transcripts saved to `~/.dsk/sessions/`, resumable
   with `--resume <id>` or `--continue`.
 
@@ -115,7 +121,7 @@ dsk config show              # view config (api key masked)
 | Command | Description |
 | --- | --- |
 | `/help` | Show help |
-| `/clear` | Reset the conversation |
+| `/clear` | Clear the screen and reset the conversation |
 | `/model [name]` | List every available model (fetched live from `GET /models`) or switch directly, e.g. `/model deepseek-v4-pro` |
 | `/config` | Show current configuration |
 | `/usage` | Show token usage and cost for this session |
@@ -129,7 +135,11 @@ dsk config show              # view config (api key masked)
 
 - `!cmd` — run a shell command and add its output to the conversation.
 - `\` + Enter / Ctrl+J — multiline prompt input.
-- `/` + Tab — command completion; `@` + Tab — file-path completion.
+- `/` or `@` — a live suggestion dropdown appears as you type (commands for
+  `/`, files for `@`); **Tab** cycles through the matches and inserts the
+  highlighted one, Shift+Tab still cycles permission modes.
+- **Paste** — multi-line pastes are buffered (bracketed paste mode), so pasted
+  newlines never submit the prompt; press **Enter** when you're ready to send.
 - **Esc** — interrupt the agent mid-turn (partial work is kept).
 - **Ctrl+C** — at a prompt: press twice to exit.
 - **Ctrl+O** — page through the session transcript (via `less`, plain fallback).

@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { sessionsDir } from "./config.js";
 import type { ChatMessage } from "./agent/deepseekClient.js";
@@ -44,6 +44,16 @@ export function saveSession(meta: { id?: string; model: string; messages: ChatMe
 export function loadSession(id: string): SessionFile {
   const raw = readFileSync(sessionPath(id), "utf8");
   return JSON.parse(raw) as SessionFile;
+}
+
+/** Delete a saved session. Throws on an invalid id; ignores missing files. */
+export function deleteSession(id: string): void {
+  assertSafeId(id);
+  try {
+    rmSync(sessionPath(id), { force: true });
+  } catch {
+    /* already gone or not deletable — treat as done */
+  }
 }
 
 export function listSessions(): SessionFile[] {

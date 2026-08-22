@@ -23,6 +23,10 @@ export interface DskConfig {
   promptColor?: string;
   /** In-session permission mode. */
   mode?: PermissionMode;
+  /** Tool names always allowed without prompting (e.g. ["bash", "write_file"]). */
+  allowedTools?: string[];
+  /** Model context window in tokens (overrides the built-in table). */
+  contextWindow?: number;
 }
 
 export const DEFAULT_MODEL = "deepseek-v4-flash";
@@ -94,6 +98,10 @@ export interface EffectiveSettings {
   promptColor?: string;
   /** Permission mode for the session. */
   mode: PermissionMode;
+  /** Tool names always allowed without prompting. */
+  allowedTools?: string[];
+  /** Model context window in tokens (overrides the built-in table). */
+  contextWindow?: number;
 }
 
 export function resolveSettings(opts: {
@@ -105,6 +113,8 @@ export function resolveSettings(opts: {
   theme?: string;
   promptColor?: string;
   mode?: PermissionMode;
+  allowedTools?: string[];
+  contextWindow?: number;
 }): EffectiveSettings {
   const cfg = loadConfig();
   const key = resolveApiKey(opts.apiKey);
@@ -125,5 +135,7 @@ export function resolveSettings(opts: {
     theme: opts.theme ?? cfg.theme,
     promptColor: opts.promptColor ?? cfg.promptColor,
     mode: opts.mode ?? cfg.mode ?? "bypassPermissions",
+    allowedTools: opts.allowedTools ?? cfg.allowedTools,
+    contextWindow: opts.contextWindow ?? cfg.contextWindow,
   };
 }
