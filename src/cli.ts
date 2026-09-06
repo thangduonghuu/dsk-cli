@@ -91,19 +91,26 @@ function maskKey(v: string | undefined): string {
  */
 async function firstRunSetup(baseUrl: string): Promise<string | null> {
   console.log(chalk.bold("\nWelcome to dsk — DeepSeek agentic CLI!"));
-  console.log(chalk.dim("This looks like your first run — let's set up your DeepSeek API key."));
+  console.log(chalk.dim("\nThis is your first run. dsk needs a DeepSeek API key to talk to the API.\n"));
+  console.log(chalk.dim("  1. Open this page in your browser:"));
+  console.log(chalk.dim("       https://platform.deepseek.com/api_keys"));
+  console.log(chalk.dim('  2. Click "Create new API key", then copy the key it shows you'));
+  console.log(chalk.dim("     (it looks like  sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx )."));
+  console.log(chalk.dim("  3. Come back here, paste the key at the prompt below, and press Enter.\n"));
   console.log(
     chalk.dim(
-      "Get one at https://platform.deepseek.com/api_keys . It will be stored in ~/.dsk/config.json with 0600 permissions and never printed."
+      "The key is saved to ~/.dsk/config.json (file permissions 0600 — only your\nuser can read it) and is never shown on screen or logged."
     )
   );
   const prompter = createPrompter(true);
   try {
     // eslint-disable-next-line no-constant-condition
     while (true) {
-      const key = await askSecret(chalk.bold("Paste your DeepSeek API key (sk-...): "));
+      const key = await askSecret(chalk.bold("Paste your copied API key here and press Enter: "));
       if (!key) {
-        console.log(chalk.yellow("No key entered — aborting setup. Run `dsk config set api-key <key>` later."));
+        console.log(
+          chalk.yellow("Nothing pasted — setup cancelled. You can add the key later with:\n  dsk config set api-key <your-key>")
+        );
         return null;
       }
       const status = await checkApiKey(baseUrl, key);
