@@ -17,6 +17,8 @@ import { buildSystemPrompt } from "./memory.js";
 import { startRepl } from "./repl.js";
 import { createPrompter, askSecret } from "./input.js";
 import { checkApiKey } from "./models.js";
+import { VERSION } from "./version.js";
+import { notifyOnUpdate } from "./update.js";
 
 const isTTY = Boolean(stdin.isTTY && stdout.isTTY);
 
@@ -25,7 +27,7 @@ const program = new Command();
 program
   .name("dsk")
   .description("A Claude-Code-style agentic terminal tool powered by the DeepSeek API")
-  .version("0.1.0")
+  .version(VERSION)
   .option("--model <name>", `model to use (default ${DEFAULT_MODEL})`)
   .option("--api-key <key>", "DeepSeek API key (overrides DEEPSEEK_API_KEY and the config file)")
   .option("--dangerously-skip-permissions", "auto-approve all tool actions — use at your own risk")
@@ -290,6 +292,9 @@ async function main(promptWords: string[] | undefined, opts: Record<string, unkn
       process.exit(1);
     }
   }
+
+  // Suggest an upgrade if a newer version is on npm (throttled, silent on failure).
+  await notifyOnUpdate(VERSION);
 
   // Session resume.
   let resumed: ChatMessage[] | undefined;
